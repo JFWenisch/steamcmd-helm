@@ -1,0 +1,88 @@
+name: Build
+
+on:
+  push:
+    branches: 
+      - "main" 
+      - "develop" 
+      - "feature/*" 
+  pull_request:
+    branches: [ "main, develop" ]
+
+jobs:
+    
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+        tag: ${{ steps.tag_version.outputs.new_tag }}
+        changelog: ${{ steps.tag_version.outputs.changelog }}
+    steps:
+    - name: Bump version and push tag
+      id: tag_version
+      uses: mathieudutour/github-tag-action@v6.0
+      with:
+        github_token: ${{ secrets.GITHUBTOKEN }}
+  
+  build:
+    runs-on: ubuntu-latest
+    needs: version
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Update Helm chart version
+      run:  |
+        yq eval '.appVersion = "${{ needs.version.outputs.tag }}"' -i chart/Chart.yaml
+        yq eval '.version = "${{ needs.version.outputs.tag }}"' -i chart/Chart.yaml
+
+    - name: Commit and push updated Helm chart
+      run: |
+        git config --global user.name 'github-actions[bot]'
+        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+        git add chart/Chart.yaml
+        git commit -m "[skip ci] Update Helm chart appVersion to ${{ needs.version.outputs.tag }}"
+        git push origin ${{ github.ref }}
+
+    - name: Package Helm chart
+      run: helm package chart/ --destination ./release
+
+    - name: Clone charts repository
+      env:
+        GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      run: |
+        git clone https://$GH_TOKEN@github.com/JFWenisch/charts.git
+        cp ./release/*.tgz charts/steamcmd/
+        cd charts
+        git config --global user.name 'github-actions[bot]'
+        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+        git add .
+        git commit -m "Add steamcmd chart in version ${{ needs.version.outputs.tag }}"
+        git push https://$GH_TOKEN@github.com/JFWenisch/charts.git main
+
+
+    - name: Upload Helm chart artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: helm-chart
+        path: ./release/*.tgz
+
+  release:
+    runs-on: ubuntu-latest
+    needs:  [version, build]
+    if: github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Download Helm chart artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: helm-chart
+        path: ./release
+
+    - name: Create a GitHub release
+      uses: ncipollo/release-action@v1
+      with:
+        tag: ${{needs.version.outputs.tag}}
+        name: Release ${{needs.version.outputs.tag}}
+        body: ${{needs.version.outputs.changelog}}
+        artifacts: |
+          ./release/*.tgz
